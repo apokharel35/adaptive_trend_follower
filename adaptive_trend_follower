@@ -1,5 +1,5 @@
 //@version=6
-strategy('Trend Strategy - v2 w/ Session Filter, Fixed Stops & 16:05 EOD Exit', overlay=true)
+strategy('Trend Strategy v2 – Bar-Low/High Tick-Trail Both Sides', overlay=true)
 
 // === INPUTS ===
 Periods           = input.int(18,    'ATR Period')
@@ -8,35 +8,45 @@ Multiplier        = input.float(1.9, 'ATR Multiplier',               step=0.1)
 BufferMultiplier  = input.float(1.5, 'Stop Loss Buffer Multiplier', step=0.1)
 StopDelayBars     = input.int(2,    'Stop Trailing Delay (Bars)')
 
-changeATR    = input.bool(false,'Change ATR Calculation Method ?')
-showsignals  = input.bool(false,'Show Buy/Sell Signals ?')
-highlighting = input.bool(true, 'Highlighter On/Off ?')
-barcoloring  = input.bool(true, 'Bar Coloring On/Off ?')
+changeATR    = input.bool(false,'Change ATR Calculation Method?')
+showsignals  = input.bool(false,'Show Buy/Sell Signals?')
+highlighting = input.bool(true, 'Highlighter On/Off?')
+barcoloring  = input.bool(true, 'Bar Coloring On/Off?')
 
-// === DATE RANGE FILTER ===
-FromMonth = input.int(9,    'From Month', 1, 12)
-FromDay   = input.int(1,    'From Day',   1, 31)
-FromYear  = input.int(2018, 'From Year', 1900, 2100)
-ToMonth   = input.int(1,    'To Month',   1, 12)
-ToDay     = input.int(31,   'To Day',     1, 31)
-ToYear    = input.int(2100, 'To Year',    1900, 2100)
-
-_start  = timestamp(FromYear, FromMonth, FromDay, 00, 00)
-_finish = timestamp(ToYear,   ToMonth,   ToDay,   23, 59)
+// === DATE RANGE & SESSION FILTERS ===
+FromMonth = input.int(9,    'From Month', 1,12)
+FromDay   = input.int(1,    'From Day',   1,31)
+FromYear  = input.int(2018, 'From Year',1900,2100)
+ToMonth   = input.int(1,    'To Month',   1,12)
+ToDay     = input.int(31,   'To Day',     1,31)
+ToYear    = input.int(2100, 'To Year',   1900,2100)
+_start  = timestamp(FromYear,FromMonth,FromDay,00,00)
+_finish = timestamp(ToYear,  ToMonth,  ToDay,  23,59)
 inDateRange() => time >= _start and time <= _finish
 
-// === SESSION FILTERS (for entries only) ===
-enableAsia    = input.bool(true, 'Enable Asian Session')
-asiaSess      = input.session('1800-0000', 'Asian Session')
-enableLondon  = input.bool(true, 'Enable London Session')
-londonSess    = input.session('0000-0930', 'London Session')
-enableNY      = input.bool(true, 'Enable NY Session')
-nySess        = input.session('0930-1610', 'NY Session')
+enableAsia   = input.bool(true,'Enable Asian Session')
+asiaSess     = input.session('1605-0000','Asian Session')  // default 16:05–00:00
+enableLondon = input.bool(true,'Enable London Session')
+londonSess   = input.session('0000-0930','London Session')
+enableNY     = input.bool(true,'Enable NY Session')
+nySess       = input.session('0930-1610','NY Session')
 
-asiaOK       = enableAsia   and not na(time(timeframe.period, asiaSess))
-londonOK     = enableLondon and not na(time(timeframe.period, londonSess))
-nyOK         = enableNY     and not na(time(timeframe.period, nySess))
+asiaOK       = enableAsia   and not na(time(timeframe.period,asiaSess))
+londonOK     = enableLondon and not na(time(timeframe.period,londonSess))
+nyOK         = enableNY     and not na(time(timeframe.period,nySess))
 inAnySession = asiaOK or londonOK or nyOK
+
+// === RESET EOD FLAG DAILY ===
+var bool eodFired   = false
+var int  prevMonth  = month
+var int  prevDay    = dayofmonth
+if month != prevMonth or dayofmonth != prevDay
+    eodFired  := false
+    prevMonth := month
+    prevDay   := dayofmonth
+
+// after EOD: only Asia, otherwise any enabled session
+sessionOK = eodFired ? asiaOK : inAnySession
 
 // === ATR & SUPER-TREND CALCULATION ===
 atr2 = ta.sma(ta.tr, Periods)
@@ -53,64 +63,123 @@ dn  := close[1] < dn1 ? math.min(dn, dn1) : dn
 var int trend = 1
 trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
 
-// === PLOTTING TREND LINES & SIGNALS ===
-pUp = plot(trend==1  ? up : na, title='Up Trend',    style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
-pDn = plot(trend==-1 ? dn : na, title='Down Trend',  style=plot.style_linebr, linewidth=2, color=color.new(color.red,   0))
+// === PLOT TRENDS & SIGNALS ===
+pUp = plot(trend==1  ? up : na, title='Up Trend',    style=plot.style_linebr, linewidth=2, color=color.new(color.green,0))
+pDn = plot(trend==-1 ? dn : na, title='Down Trend',  style=plot.style_linebr, linewidth=2, color=color.new(color.red,  0))
 
-plotshape(showsignals and trend==1  and trend[1]==-1 ? up : na, title='Buy',  text='Buy',  location=location.absolute, style=shape.labelup,   size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
-plotshape(showsignals and trend==-1 and trend[1]==1  ? dn : na, title='Sell', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red,   0), textcolor=color.new(color.white, 0))
+plotshape(showsignals and trend==1  and trend[1]==-1 and inDateRange() and sessionOK ? up : na,
+     title='Buy',  text='Buy',  location=location.absolute, style=shape.labelup,   size=size.tiny, color=color.new(color.green,0), textcolor=color.white)
+plotshape(showsignals and trend==-1 and trend[1]==1  and inDateRange() and sessionOK ? dn : na,
+     title='Sell', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red,  0), textcolor=color.white)
 
-// === HIGHLIGHTING & FILLING ===
-mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1, color=color.new(color.white, 100))
-longFillColor  = highlighting and trend == 1  ? color.green : color.white
-shortFillColor = highlighting and trend == -1 ? color.red   : color.white
+// === HIGHLIGHTER ===
+mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1, color=color.new(color.white,100))
+longFillColor  = highlighting and trend==1  ? color.green : color.white
+shortFillColor = highlighting and trend==-1 ? color.red   : color.white
 fill(mPlot, pUp, color.new(longFillColor,  90), title='UpTrend Highlighter')
 fill(mPlot, pDn, color.new(shortFillColor, 90), title='DownTrend Highlighter')
 
-// === ENTRY SIGNALS & TRAILING-STOPS STORAGE ===
+// === ENTRY CONDITIONS ===
 longCond  = trend==1  and trend[1]==-1
 shortCond = trend==-1 and trend[1]==1
 
-var float longSL       = na
-var float shortSL      = na
-var int   longEntryBar  = na
-var int   shortEntryBar = na
+// === STORAGE VARS ===
+var float atrStopLong          = na
+var float atrStopShort         = na
+var int   longEntryBar         = na
+var int   shortEntryBar        = na
 
-if longCond and inDateRange() and inAnySession
-    strategy.entry('BUY',  strategy.long)
-    longEntryBar := bar_index
-    longSL       := na
+// === TICK-TRAIL LONG VARS ===
+var bool  tickTrailLongActive  = false
+var float entryHigh            = na
+var float maxTrailCloseLong    = na
+var float tickStopLong         = na
 
-if shortCond and inDateRange() and inAnySession
+// === TICK-TRAIL SHORT VARS ===
+var bool  tickTrailShortActive = false
+var float entryLow             = na
+var float minTrailCloseShort   = na
+var float tickStopShort        = na
+
+// === ON ENTRY ===
+if longCond and inDateRange() and sessionOK
+    strategy.entry('BUY', strategy.long)
+    longEntryBar          := bar_index
+    entryHigh             := high
+    atrStopLong           := na
+    tickTrailLongActive   := false
+    maxTrailCloseLong     := na
+    tickStopLong          := na
+
+if shortCond and inDateRange() and sessionOK
     strategy.entry('SELL', strategy.short)
-    shortEntryBar := bar_index
-    shortSL       := na
+    shortEntryBar         := bar_index
+    entryLow              := low
+    atrStopShort          := na
+    tickTrailShortActive  := false
+    minTrailCloseShort    := na
+    tickStopShort         := na
 
+// === WHILE LONG ===
 if strategy.position_size > 0
-    if not na(longEntryBar) and (bar_index - longEntryBar >= StopDelayBars)
-        longSL := na(longSL) ? up - BufferMultiplier * atr : math.max(longSL, up - BufferMultiplier * atr)
-    strategy.exit('Exit Long', from_entry='BUY', stop=longSL)
+    // ATR‐based until activation
+    if not tickTrailLongActive and not na(longEntryBar) and (bar_index - longEntryBar >= StopDelayBars)
+        atrStopLong := na(atrStopLong) ? up - BufferMultiplier * atr : math.max(atrStopLong, up - BufferMultiplier * atr)
+    // Activation on first close > entryHigh
+    if not tickTrailLongActive and close > entryHigh
+        tickTrailLongActive := true
+        maxTrailCloseLong   := close
+        tickStopLong        := low - 2 * syminfo.mintick
+    // Thereafter only on new higher closes
+    else if tickTrailLongActive and close > maxTrailCloseLong
+        maxTrailCloseLong   := close
+        tickStopLong        := low - 2 * syminfo.mintick
+    // Exit on whichever stop is active
+    finalLongStop = tickTrailLongActive ? tickStopLong : atrStopLong
+    strategy.exit('Exit Long', from_entry='BUY', stop=finalLongStop)
 
+// === WHILE SHORT ===
 if strategy.position_size < 0
-    if not na(shortEntryBar) and (bar_index - shortEntryBar >= StopDelayBars)
-        shortSL := na(shortSL) ? dn + BufferMultiplier * atr : math.min(shortSL, dn + BufferMultiplier * atr)
-    strategy.exit('Exit Short', from_entry='SELL', stop=shortSL)
+    // ATR‐based until activation
+    if not tickTrailShortActive and not na(shortEntryBar) and (bar_index - shortEntryBar >= StopDelayBars)
+        atrStopShort := na(atrStopShort) ? dn + BufferMultiplier * atr : math.min(atrStopShort, dn + BufferMultiplier * atr)
+    // Activation on first close < entryLow
+    if not tickTrailShortActive and close < entryLow
+        tickTrailShortActive := true
+        minTrailCloseShort   := close
+        tickStopShort        := high + 2 * syminfo.mintick
+    // Thereafter only on new lower closes
+    else if tickTrailShortActive and close < minTrailCloseShort
+        minTrailCloseShort   := close
+        tickStopShort        := high + 2 * syminfo.mintick
+    // Exit on whichever stop is active
+    finalShortStop = tickTrailShortActive ? tickStopShort : atrStopShort
+    strategy.exit('Exit Short', from_entry='SELL', stop=finalShortStop)
 
 // === RESET WHEN FLAT ===
 if strategy.position_size == 0
-    longEntryBar  := na
-    shortEntryBar := na
-    longSL        := na
-    shortSL       := na
+    longEntryBar           := na
+    shortEntryBar          := na
+    atrStopLong            := na
+    atrStopShort           := na
+    entryHigh              := na
+    tickTrailLongActive    := false
+    maxTrailCloseLong      := na
+    tickStopLong           := na
+    entryLow               := na
+    tickTrailShortActive   := false
+    minTrailCloseShort     := na
+    tickStopShort          := na
 
-// === 16:05 NYT EOD EXIT + SHAPE ===
+// === 16:05 NYT EOD EXIT & MARKER ===
 eodExit = hour(time, "America/New_York") == 16 and minute(time, "America/New_York") == 5
 if eodExit and strategy.position_size != 0
     strategy.close_all(comment='EOD Exit')
-// plotshape(eodExit, title='EOD Exit', text='EOD Exit', style=shape.labeldown, location=location.abovebar, size=size.small, color=color.orange, textcolor=color.white)
+    eodFired := true
+plotshape(eodExit, title='EOD Exit', text='EOD Exit', style=shape.labeldown, location=location.abovebar, size=size.small, color=color.orange, textcolor=color.white)
 
 // === BAR COLORING ===
-b1  = ta.barssince(longCond)
-s1  = ta.barssince(shortCond)
+b1 = ta.barssince(longCond)
+s1 = ta.barssince(shortCond)
 col = b1[1] < s1[1] ? color.green : b1[1] > s1[1] ? color.red : na
 barcolor(barcoloring ? col : na)
