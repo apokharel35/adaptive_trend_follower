@@ -1,0 +1,99 @@
+//@version=6
+strategy('Trend Strategy - v2 with Buffer and Trailing Stop Delay', overlay=true)
+
+// Input parameters
+Periods           = input.int(defval=18, title='ATR Period')
+src               = input.source(defval=low, title='Source')
+Multiplier        = input.float(defval=1.9, title='ATR Multiplier', step=0.1)
+BufferMultiplier  = input.float(defval=1.5, title='Stop Loss Buffer Multiplier (ATR)', step=0.1)
+StopDelayBars     = input.int(defval=2, title='Stop Trailing Delay (Bars)')
+
+changeATR         = input.bool(defval=false, title='Change ATR Calculation Method ?')
+showsignals       = input.bool(defval=false, title='Show Buy/Sell Signals ?')
+highlighting      = input.bool(defval=true,  title='Highlighter On/Off ?')
+barcoloring       = input.bool(defval=true,  title='Bar Coloring On/Off ?')
+
+// ATR Calculation
+atr2 = ta.sma(ta.tr, Periods)
+atr  = changeATR ? ta.atr(Periods) : atr2
+
+up  = src - Multiplier * atr
+up1 = nz(up[1], up)
+up  := close[1] > up1 ? math.max(up, up1) : up
+
+dn  = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn  := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+// Trend Detection
+var int trend = 1
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// Plotting Trend Lines
+upPlot    = plot(trend == 1 ? up : na, title='Up Trend',    style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal and showsignals ? up : na, title='Buy', text='Buy',
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+
+dnPlot     = plot(trend == -1 ? dn : na, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal and showsignals ? dn : na, title='Sell', text='Sell',
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+// Highlighting and Filling
+// – use a fully transparent plot (linewidth defaults to 1, but color makes it invisible)
+mPlot           = plot(ohlc4, title='', style=plot.style_circles, color=color.new(color.white, 100))
+longFillColor   = highlighting and trend == 1 ? color.green : color.white
+shortFillColor  = highlighting and trend == -1 ? color.red   : color.white
+fill(mPlot, upPlot,   color.new(longFillColor, 90), title='UpTrend Highlighter')
+fill(mPlot, dnPlot,   color.new(shortFillColor, 90), title='DownTrend Highlighter')
+
+// Date Range Inputs
+FromMonth = input.int(defval=9,    title='From Month', minval=1, maxval=12)
+FromDay   = input.int(defval=1,    title='From Day',   minval=1, maxval=31)
+FromYear  = input.int(defval=2018, title='From Year',  minval=1900, maxval=2100)
+ToMonth   = input.int(defval=1,    title='To Month',   minval=1, maxval=12)
+ToDay     = input.int(defval=31,   title='To Day',     minval=1, maxval=31)
+ToYear    = input.int(defval=2100, title='To Year',    minval=1900, maxval=2100)
+
+start  = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear,   ToMonth,   ToDay,   23, 59)
+
+window() =>
+    time >= start and time <= finish
+
+// Entries
+longCondition  = buySignal
+shortCondition = sellSignal
+
+if (longCondition and window())
+    strategy.entry('BUY',  strategy.long)
+
+if (shortCondition and window())
+    strategy.entry('SELL', strategy.short)
+
+// Trailing Stop Loss with Buffer & Delay
+var float longStopLoss  = na
+var float shortStopLoss = na
+
+if strategy.position_size > 0
+    if ta.barssince(longCondition) >= StopDelayBars
+        longStopLoss := na(longStopLoss) 
+             ? up - BufferMultiplier * atr 
+             : math.max(longStopLoss, up - BufferMultiplier * atr)
+    strategy.exit('Exit Long', from_entry='BUY', stop=longStopLoss)
+
+if strategy.position_size < 0
+    if ta.barssince(shortCondition) >= StopDelayBars
+        shortStopLoss := na(shortStopLoss) 
+             ? dn + BufferMultiplier * atr 
+             : math.min(shortStopLoss, dn + BufferMultiplier * atr)
+    strategy.exit('Exit Short', from_entry='SELL', stop=shortStopLoss)
+
+// Bar Coloring Logic
+buy1   = ta.barssince(buySignal)
+sell1  = ta.barssince(sellSignal)
+color1 = buy1[1] < sell1[1] ? color.green : buy1[1] > sell1[1] ? color.red : na
+barcolor(barcoloring ? color1 : na)
