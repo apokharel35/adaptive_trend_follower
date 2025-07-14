@@ -2,184 +2,176 @@
 strategy('Trend Strategy v2 – Bar-Low/High Tick-Trail Both Sides', overlay=true)
 
 // === INPUTS ===
-Periods           = input.int(18,    'ATR Period')
-src               = input.source(hl2,'Source')
-Multiplier        = input.float(1.9, 'ATR Multiplier',               step=0.1)
-BufferMultiplier  = input.float(1.5, 'Stop Loss Buffer Multiplier', step=0.1)
-StopDelayBars     = input.int(2,    'Stop Trailing Delay (Bars)')
+Periods          = input.int(18,  'ATR Period')
+src              = input.source(hl2, 'Source')
+Multiplier       = input.float(1.9, 'ATR Multiplier', step=0.1)
+BufferMultiplier = input.float(1.5, 'Stop Loss Buffer Multiplier', step=0.1)
+StopDelayBars    = input.int(2,    'Stop Trailing Delay (Bars)')
 
-changeATR    = input.bool(false,'Change ATR Calculation Method?')
-showsignals  = input.bool(false,'Show Buy/Sell Signals?')
-highlighting = input.bool(true, 'Highlighter On/Off?')
-barcoloring  = input.bool(true, 'Bar Coloring On/Off?')
+changeATR   = input.bool(false, 'Use EMA ATR?')
+showsignals = input.bool(false, 'Show Buy/Sell Signals?')
+highlighting= input.bool(true,  'Highlighter On/Off?')
+barcoloring = input.bool(true,  'Bar Coloring On/Off?')
 
-// === DATE RANGE & SESSION FILTERS ===
-FromMonth = input.int(9,    'From Month', 1,12)
-FromDay   = input.int(1,    'From Day',   1,31)
-FromYear  = input.int(2018, 'From Year',1900,2100)
-ToMonth   = input.int(1,    'To Month',   1,12)
-ToDay     = input.int(31,   'To Day',     1,31)
-ToYear    = input.int(2100, 'To Year',   1900,2100)
-_start  = timestamp(FromYear,FromMonth,FromDay,00,00)
-_finish = timestamp(ToYear,  ToMonth,  ToDay,  23,59)
-inDateRange() => time >= _start and time <= _finish
+// === DATE RANGE ===
+FromY = input.int(2018, 'From Year', 1900, 2100)
+FromM = input.int(9,    'From Month', 1, 12)
+FromD = input.int(1,    'From Day',   1, 31)
+ToY   = input.int(2100, 'To Year',   1900, 2100)
+ToM   = input.int(1,    'To Month',   1, 12)
+ToD   = input.int(31,   'To Day',     1, 31)
+_start  = timestamp('America/New_York', FromY, FromM, FromD, 0, 0)
+_finish = timestamp('America/New_York', ToY,   ToM,   ToD,   23,59)
+inDateRange = time >= _start and time <= _finish
 
-enableAsia   = input.bool(true,'Enable Asian Session')
-asiaSess     = input.session('1605-0000','Asian Session')  // default 16:05–00:00
-enableLondon = input.bool(true,'Enable London Session')
-londonSess   = input.session('0000-0930','London Session')
-enableNY     = input.bool(true,'Enable NY Session')
-nySess       = input.session('0930-1610','NY Session')
+// === SESSIONS ===
+enableAsia   = input.bool(false, 'Enable Asian Session')
+asiaSess     = input.session('1605-0000', 'Asia')
+enableLondon = input.bool(false, 'Enable London Session')
+londonSess   = input.session('0000-0930', 'London')
+enableNY     = input.bool(true,  'Enable NY Session')
+nySess       = input.session('0930-1610', 'NY')
 
-asiaOK       = enableAsia   and not na(time(timeframe.period,asiaSess))
-londonOK     = enableLondon and not na(time(timeframe.period,londonSess))
-nyOK         = enableNY     and not na(time(timeframe.period,nySess))
-inAnySession = asiaOK or londonOK or nyOK
+asiaOK   = enableAsia   and not na(time(timeframe.period, asiaSess))
+londonOK = enableLondon and not na(time(timeframe.period, londonSess))
+nyOK     = enableNY     and not na(time(timeframe.period, nySess))
 
-// === RESET EOD FLAG DAILY ===
+baseSessionOK = asiaOK or londonOK or nyOK
+
+// === NY LUNCH FILTER ===
+enableLunch = input.bool(false, 'Enable NY Lunch Filter')
+lunchSess   = input.session('1200-1330', 'NY Lunch')
+inLunch    = not na(time(timeframe.period, lunchSess))
+
+// allow new trades only if in session and not in lunch
+canEnter = baseSessionOK and not (enableLunch and inLunch)
+
+// === EOD RESET & FLAG ===
 var bool eodFired   = false
-var int  prevMonth  = month
-var int  prevDay    = dayofmonth
-if month != prevMonth or dayofmonth != prevDay
+var int  prevNYDay  = na
+nyDay = dayofmonth(time('D'), 'America/New_York')
+if na(prevNYDay) or nyDay != prevNYDay
     eodFired  := false
-    prevMonth := month
-    prevDay   := dayofmonth
+    prevNYDay := nyDay
 
-// after EOD: only Asia, otherwise any enabled session
-sessionOK = eodFired ? asiaOK : inAnySession
+// EOD exit at 16:05 NY
+eodStart = timestamp('America/New_York', year, month, dayofmonth, 16, 5)
+eodEnd   = timestamp('America/New_York', year, month, dayofmonth, 16, 6)
+eodExit  = time >= eodStart and time < eodEnd
+if eodExit and strategy.position_size != 0 and not eodFired
+    strategy.close_all(comment='EOD Exit')
+    eodFired := true
 
-// === ATR & SUPER-TREND CALCULATION ===
-atr2 = ta.sma(ta.tr, Periods)
-atr  = changeATR ? ta.atr(Periods) : atr2
+// === PRICE FILTER ===
+validTime = inDateRange and (eodFired ? (enableAsia and asiaOK) : baseSessionOK)
 
-up  = src - Multiplier * atr
-up1 = nz(up[1], up)
-up  := close[1] > up1 ? math.max(up, up1) : up
+// === ATR & SUPER-TREND ===
+atrVal = changeATR ? ta.atr(Periods) : ta.sma(ta.tr, Periods)
+srcVal = src
 
-dn  = src + Multiplier * atr
-dn1 = nz(dn[1], dn)
-dn  := close[1] < dn1 ? math.min(dn, dn1) : dn
+defUp  = srcVal - Multiplier * atrVal
+prevUp = nz(defUp[1], defUp)
+up     = close[1] > prevUp ? math.max(defUp, prevUp) : defUp
+
+defDn  = srcVal + Multiplier * atrVal
+prevDn = nz(defDn[1], defDn)
+dn     = close[1] < prevDn ? math.min(defDn, prevDn) : defDn
 
 var int trend = 1
-trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+trend := trend == -1 and close > prevDn ? 1 : trend == 1 and close < prevUp ? -1 : trend
 
-// === PLOT TRENDS & SIGNALS ===
-pUp = plot(trend==1  ? up : na, title='Up Trend',    style=plot.style_linebr, linewidth=2, color=color.new(color.green,0))
-pDn = plot(trend==-1 ? dn : na, title='Down Trend',  style=plot.style_linebr, linewidth=2, color=color.new(color.red,  0))
+// === PLOTS & SIGNALS ===
+pUp = plot(trend==1 ? up : na, title='Up Line', style=plot.style_line, linewidth=2, color=color.green)
+pDn = plot(trend==-1? dn : na, title='Dn Line', style=plot.style_line, linewidth=2, color=color.red)
 
-plotshape(showsignals and trend==1  and trend[1]==-1 and inDateRange() and sessionOK ? up : na,
-     title='Buy',  text='Buy',  location=location.absolute, style=shape.labelup,   size=size.tiny, color=color.new(color.green,0), textcolor=color.white)
-plotshape(showsignals and trend==-1 and trend[1]==1  and inDateRange() and sessionOK ? dn : na,
-     title='Sell', text='Sell', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red,  0), textcolor=color.white)
-
-// === HIGHLIGHTER ===
-mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=1, color=color.new(color.white,100))
-longFillColor  = highlighting and trend==1  ? color.green : color.white
-shortFillColor = highlighting and trend==-1 ? color.red   : color.white
-fill(mPlot, pUp, color.new(longFillColor,  90), title='UpTrend Highlighter')
-fill(mPlot, pDn, color.new(shortFillColor, 90), title='DownTrend Highlighter')
+plotshape(showsignals and trend==1 and trend[1]==-1 and validTime, title='Buy', style=shape.labelup, text='BUY', color=color.green, location=location.belowbar)
+plotshape(showsignals and trend==-1 and trend[1]==1 and validTime, title='Sell', style=shape.labeldown, text='SELL', color=color.red, location=location.abovebar)
 
 // === ENTRY CONDITIONS ===
-longCond  = trend==1  and trend[1]==-1
-shortCond = trend==-1 and trend[1]==1
+longCond  = trend==1  and trend[1]==-1 and validTime and canEnter
+shortCond = trend==-1 and trend[1]==1  and validTime and canEnter
 
-// === STORAGE VARS ===
-var float atrStopLong          = na
-var float atrStopShort         = na
-var int   longEntryBar         = na
-var int   shortEntryBar        = na
-
-// === TICK-TRAIL LONG VARS ===
-var bool  tickTrailLongActive  = false
-var float entryHigh            = na
-var float maxTrailCloseLong    = na
-var float tickStopLong         = na
-
-// === TICK-TRAIL SHORT VARS ===
-var bool  tickTrailShortActive = false
-var float entryLow             = na
-var float minTrailCloseShort   = na
-var float tickStopShort        = na
+// === STATE VARS ===
+var int   longEntryBar  = na
+var int   shortEntryBar = na
+var float entryHigh     = na
+var float entryLow      = na
+var bool  tickLong      = false
+var bool  tickShort     = false
+var float atrStopL      = na
+var float atrStopS      = na
+var float trailStopL    = na
+var float trailStopS    = na
 
 // === ON ENTRY ===
-if longCond and inDateRange() and sessionOK
-    strategy.entry('BUY', strategy.long)
-    longEntryBar          := bar_index
-    entryHigh             := high
-    atrStopLong           := na
-    tickTrailLongActive   := false
-    maxTrailCloseLong     := na
-    tickStopLong          := na
+if longCond
+    strategy.entry('Long', strategy.long)
+    longEntryBar := bar_index
+    entryHigh    := high
+    tickLong     := false
+    atrStopL     := na
+    trailStopL   := na
 
-if shortCond and inDateRange() and sessionOK
-    strategy.entry('SELL', strategy.short)
-    shortEntryBar         := bar_index
-    entryLow              := low
-    atrStopShort          := na
-    tickTrailShortActive  := false
-    minTrailCloseShort    := na
-    tickStopShort         := na
+if shortCond
+    strategy.entry('Short', strategy.short)
+    shortEntryBar := bar_index
+    entryLow      := low
+    tickShort     := false
+    atrStopS      := na
+    trailStopS    := na
 
 // === WHILE LONG ===
 if strategy.position_size > 0
-    // ATR‐based until activation
-    if not tickTrailLongActive and not na(longEntryBar) and (bar_index - longEntryBar >= StopDelayBars)
-        atrStopLong := na(atrStopLong) ? up - BufferMultiplier * atr : math.max(atrStopLong, up - BufferMultiplier * atr)
-    // Activation on first close > entryHigh
-    if not tickTrailLongActive and close > entryHigh
-        tickTrailLongActive := true
-        maxTrailCloseLong   := close
-        tickStopLong        := low - 2 * syminfo.mintick
-    // Thereafter only on new higher closes
-    else if tickTrailLongActive and close > maxTrailCloseLong
-        maxTrailCloseLong   := close
-        tickStopLong        := low - 2 * syminfo.mintick
-    // Exit on whichever stop is active
-    finalLongStop = tickTrailLongActive ? tickStopLong : atrStopLong
-    strategy.exit('Exit Long', from_entry='BUY', stop=finalLongStop)
+    // ATR stop after delay
+    if not tickLong and bar_index - longEntryBar >= StopDelayBars
+        cand     = up - BufferMultiplier * atrVal
+        atrStopL := na(atrStopL) ? cand : math.max(atrStopL, cand)
+    // tick trail activation on intrabar high
+    if not tickLong and high > entryHigh
+        tickLong    := true
+        trailStopL  := high - 2*syminfo.mintick
+    // update on new highs
+    else if tickLong and high > entryHigh
+        trailStopL  := high - 2*syminfo.mintick
+    finalStopL = tickLong ? trailStopL : atrStopL
+    strategy.exit('ExitLong','Long', stop=finalStopL)
 
 // === WHILE SHORT ===
 if strategy.position_size < 0
-    // ATR‐based until activation
-    if not tickTrailShortActive and not na(shortEntryBar) and (bar_index - shortEntryBar >= StopDelayBars)
-        atrStopShort := na(atrStopShort) ? dn + BufferMultiplier * atr : math.min(atrStopShort, dn + BufferMultiplier * atr)
-    // Activation on first close < entryLow
-    if not tickTrailShortActive and close < entryLow
-        tickTrailShortActive := true
-        minTrailCloseShort   := close
-        tickStopShort        := high + 2 * syminfo.mintick
-    // Thereafter only on new lower closes
-    else if tickTrailShortActive and close < minTrailCloseShort
-        minTrailCloseShort   := close
-        tickStopShort        := high + 2 * syminfo.mintick
-    // Exit on whichever stop is active
-    finalShortStop = tickTrailShortActive ? tickStopShort : atrStopShort
-    strategy.exit('Exit Short', from_entry='SELL', stop=finalShortStop)
+    // ATR stop after delay
+    if not tickShort and bar_index - shortEntryBar >= StopDelayBars
+        candS    = dn + BufferMultiplier * atrVal
+        atrStopS := na(atrStopS) ? candS : math.min(atrStopS, candS)
+    // tick trail activation
+    if not tickShort and low < entryLow
+        tickShort   := true
+        trailStopS  := low + 2*syminfo.mintick
+    // update on new lows
+    else if tickShort and low < entryLow
+        trailStopS  := low + 2*syminfo.mintick
+    finalStopS = tickShort ? trailStopS : atrStopS
+    strategy.exit('ExitShort','Short', stop=finalStopS)
 
-// === RESET WHEN FLAT ===
+// === RESET ON FLAT ===
 if strategy.position_size == 0
-    longEntryBar           := na
-    shortEntryBar          := na
-    atrStopLong            := na
-    atrStopShort           := na
-    entryHigh              := na
-    tickTrailLongActive    := false
-    maxTrailCloseLong      := na
-    tickStopLong           := na
-    entryLow               := na
-    tickTrailShortActive   := false
-    minTrailCloseShort     := na
-    tickStopShort          := na
+    longEntryBar := na
+    shortEntryBar:= na
+    entryHigh    := na
+    entryLow     := na
+    tickLong     := false
+    tickShort    := false
+    atrStopL     := na
+    atrStopS     := na
+    trailStopL   := na
+    trailStopS   := na
 
-// === 16:05 NYT EOD EXIT & MARKER ===
-eodExit = hour(time, "America/New_York") == 16 and minute(time, "America/New_York") == 5
-if eodExit and strategy.position_size != 0
-    strategy.close_all(comment='EOD Exit')
-    eodFired := true
-plotshape(eodExit, title='EOD Exit', text='EOD Exit', style=shape.labeldown, location=location.abovebar, size=size.small, color=color.orange, textcolor=color.white)
+// === STOP PLOTS ===
+plot(atrStopL, title='ATR Stop L', color=color.new(color.blue,0), style=plot.style_line)
+plot(trailStopL, title='Tick Stop L', color=color.new(color.red,0), style=plot.style_linebr)
+plot(atrStopS, title='ATR Stop S', color=color.new(color.blue,0), style=plot.style_line)
+plot(trailStopS, title='Tick Stop S', color=color.new(color.red,0), style=plot.style_linebr)
 
-// === BAR COLORING ===
-b1 = ta.barssince(longCond)
-s1 = ta.barssince(shortCond)
-col = b1[1] < s1[1] ? color.green : b1[1] > s1[1] ? color.red : na
-barcolor(barcoloring ? col : na)
+// === BAR COLOR ===
+buyBar  = ta.barssince(longCond)
+sellBar = ta.barssince(shortCond)
+barcolor(barcoloring ? (buyBar < sellBar ? color.green : color.red) : na)
